@@ -211,8 +211,9 @@ poller = ApiPoller.new(options[:base_url], options[:token], interval)
 opener = GateOpener.new(poller, options[:host], options[:port].to_i)
 
 Signal.trap("INT") {
-  puts "Interrupt"
+  LOG.debug("Interrupt")
   exit(0)
 }
 
 poller.run
+
