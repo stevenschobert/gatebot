@@ -1,0 +1,218 @@
+#!/usr/bin/env ruby
+
+require "optparse"
+require "observer"
+require "net/https"
+require "uri"
+require "logger"
+require "json"
+require "timeout"
+
+LOG = Logger.new(STDOUT)
+
+LOG.level = Logger::WARN
+
+class ApiPoller
+
+  include Observable
+
+  STATUS_PATH = "/api".freeze
+  RESET_PATH = "/api/reset".freeze
+
+  attr_reader :base_url
+  attr_reader :token
+  attr_reader :interval
+
+  attr_accessor :last_status
+
+  def initialize(base_url, token, interval)
+    @base_url = base_url
+    @token = token
+    @interval = interval
+  end
+
+  def run
+    last_status = nil
+    loop do
+      LOG.debug("polling")
+      status = get_status_json
+      if status["shouldOpen"] != last_status
+        changed
+        last_status = status["shouldOpen"]
+        notify_observers(Time.now, status["shouldOpen"])
+      end
+      sleep interval
+    end
+  end
+
+  def reset
+    LOG.info("resetting")
+
+    request = Net::HTTP::Post.new(RESET_PATH)
+    request["Content-Type"] = "application/json"
+    request["X-Api-Token"] = token
+
+    res = http.request(request)
+    unless res.kind_of?(Net::HTTPSuccess)
+      LOG.warn("API returned non-200 response for URL #{ base_uri.to_s }#{ RESET_PATH }: #{ res.code }")
+      return
+    end
+
+    JSON.parse(parse_body(res, res.body))
+  end
+
+  protected
+
+  def base_uri
+    @base_uri ||= URI.parse(base_url.to_s)
+  end
+
+  def get_status_json
+    request = Net::HTTP::Get.new(STATUS_PATH)
+    request["Content-Type"] = "application/json"
+
+    res = http.request(request)
+    unless res.kind_of?(Net::HTTPSuccess)
+      LOG.warn("API returned non-200 response for URL #{ base_uri.to_s }#{ STATUS_PATH }: #{ res.code }")
+      return
+    end
+
+    JSON.parse(parse_body(res, res.body))
+  end
+
+  def http
+    @http ||= begin
+      net = Net::HTTP.new(base_uri.host, base_uri.port)
+      if base_uri.scheme == "https"
+        net.use_ssl = true
+      end
+      net
+    end
+  end
+
+  def parse_body(http_response, body)
+    content_encoding = http_response["content-encoding"]
+
+    if (!body) || body.empty?
+      body
+    elsif content_encoding == "gzip"
+      Zlib::GzipReader.new(StringIO.new(body)).read
+    elsif content_encoding == "deflate"
+      begin
+        Zlib::Inflate.new.inflate body
+      rescue Zlib::DataError
+        Zlib::Inflate.new(-Zlib::MAX_WBITS).inflate body
+      end
+    else
+      body
+    end
+  end
+
+end
+
+class GateOpener
+  attr_reader :poller
+  attr_reader :ip_address
+  attr_reader :port
+
+  def initialize(poller, ip_address, port)
+    @poller = poller
+    @ip_address = ip_address
+    @port = port
+
+    poller.add_observer(self)
+  end
+
+  def update(time, should_open_gate)
+    LOG.debug("Poll changed at #{ time }")
+
+    if should_open_gate
+      LOG.debug("opening gate")
+
+      bytes_sent = socket.send("o", 0)
+      unless bytes_sent > 0
+        LOG.error("No bytes written to socket #{ ip_address }:#{ port }")
+        return
+      end
+
+      read_string = ""
+      begin
+        Timeout::timeout(5) { read_string = socket.recv(100) }
+      rescue Timeout::Error => e
+        LOG.warn("Failed to get a reply from #{ ip_address }:#{ port }")
+      end
+
+      if read_string.to_s == "Opened"
+        reset_status = poller.reset
+        unless reset_status["success"] == true
+          LOG.warn("Failed to reset status on server #{ reset_status }")
+        end
+      else
+        LOG.error("Did not get successful open reply form device #{ ip_address }:#{ port } - #{ read_string }")
+      end
+    end
+  end
+
+  protected
+
+  def socket
+    @socker ||= begin
+      sock = UDPSocket.new
+      sock.connect(ip_address, port)
+      sock
+    end
+  end
+
+end
+
+options = {}
+opt_parser = OptionParser.new do |opts|
+  opts.banner = "Usage: gate_poller [options]"
+
+  opts.on("-tTOKEN", "--token=TOKEN", "API token") do |token|
+    options[:token] = token
+  end
+
+  opts.on("-uBASE_URL", "--url=BASE_URL", "Base URL") do |base_url|
+    options[:base_url] = base_url
+  end
+
+  opts.on("-iINTERVAL", "--interval=INTERVAL", "Interval to poll at (in seconds)") do |interval|
+    options[:interval] = interval
+  end
+
+  opts.on("-pPORT", "--port=PORT", "Port to connect to hardware on") do |port|
+    options[:port] = port
+  end
+
+  opts.on("-hHOST", "--host=HOST", "Host/IP Address to connect to hardware on") do |host|
+    options[:host] = host
+  end
+
+end
+opt_parser.parse!
+
+unless options.key?(:token) && options.key?(:base_url)
+  LOG.error("Please provide a token and url to poll")
+  exit(1)
+end
+
+unless options.key?(:host) && options.key?(:port)
+  LOG.error("Please provide a host and port to connect to")
+  exit(1)
+end
+
+interval = 1
+if options.key?(:interval)
+  interval = options[:interval].to_i
+end
+
+poller = ApiPoller.new(options[:base_url], options[:token], interval)
+opener = GateOpener.new(poller, options[:host], options[:port].to_i)
+
+Signal.trap("INT") {
+  puts "Interrupt"
+  exit(0)
+}
+
+poller.run
