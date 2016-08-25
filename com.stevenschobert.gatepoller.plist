@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>KeepAlive</key>
+	<true/>
+	<key>Label</key>
+	<string>com.stevenschobert.gatepoller</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/bin/gate_poller</string>
+		<string>--token</string>
+		<string>TOKEN</string>
+		<string>--url</string>
+		<string>URL</string>
+		<string>-h</string>
+		<string>IP</string>
+		<string>-p</string>
+		<string>PORT</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+</dict>
+</plist>
